@@ -17,7 +17,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # token do botdosnivers
 DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+GOOGLE_SHEET_ID = (os.getenv("GOOGLE_SHEET_ID") or "").strip()
 GOOGLE_SHEET_TAB = os.getenv("GOOGLE_SHEET_TAB", "Aniversários")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
 
@@ -35,6 +35,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
 ]
+
+# cliente gspread global
+gc = None
 
 def load_sa_creds():
     """
@@ -85,6 +88,14 @@ def build_gspread_client():
     return gspread.authorize(creds)
 
 
+def _ensure_gc():
+    """Garante que o cliente gspread esteja construído."""
+    global gc
+    if gc is None:
+        gc = build_gspread_client()
+    return gc
+
+
 def _safe_date(y: int, m: int, d: int):
     try:
         return date(y, m, d)
@@ -109,21 +120,24 @@ def parse_day_month(date_str: str):
 def fetch_birthdays_rows():
     """Lê linhas da aba e retorna [{'nome':..., 'data':...}, ...] com tratamento de erros claro."""
     try:
-        sh = gc.open_by_key(GOOGLE_SHEET_ID)
+        client = _ensure_gc()
+        sh = client.open_by_key(GOOGLE_SHEET_ID.strip())
     except APIError as e:
-        # PERMISSION_DENIED ou NOT_FOUND, etc.
-        motivo = ""
+        # PERMISSION_DENIED, NOT_FOUND, API disabled, etc.
+        detail = ""
         try:
-            motivo = e.response.json().get("error", {}).get("message", "")
+            detail = e.response.json().get("error", {}).get("message", "")
         except Exception:
-            pass
+            detail = repr(e)
         raise RuntimeError(
-            f"🚨 Erro ao abrir a planilha {GOOGLE_SHEET_ID}. "
-            f"Verifique se ela existe e se está **compartilhada como Leitor** com: `{_sa_email()}`. "
-            f"Detalhe da API: {motivo or e}"
+            f"🚨 Erro ao abrir a planilha `{GOOGLE_SHEET_ID}`. "
+            f"Confira o ID e se está **compartilhada (Leitor)** com `{_sa_email()}`. "
+            f"Detalhe da API: {detail}"
         )
+    except AttributeError:
+        raise RuntimeError("🚨 Cliente do Google Sheets não inicializado (gc=None).")
     except Exception as e:
-        raise RuntimeError(f"🚨 Falha inesperada ao abrir a planilha: {e}")
+        raise RuntimeError(f"🚨 Falha inesperada ao abrir a planilha: {repr(e)}")
 
     try:
         ws = sh.worksheet(GOOGLE_SHEET_TAB)
@@ -136,7 +150,12 @@ def fetch_birthdays_rows():
     try:
         rows = ws.get_all_records()  # primeira linha como header
     except APIError as e:
-        raise RuntimeError(f"🚨 Erro ao ler a aba '{GOOGLE_SHEET_TAB}': {e}")
+        detail = ""
+        try:
+            detail = e.response.json().get("error", {}).get("message", "")
+        except Exception:
+            detail = repr(e)
+        raise RuntimeError(f"🚨 Erro ao ler a aba '{GOOGLE_SHEET_TAB}': {detail}")
 
     normalized = []
     for r in rows:
@@ -219,7 +238,6 @@ def _last_and_next_birthdays(rows, today: date):
 
 # Evita postagens duplicadas se o bot reiniciar no mesmo minuto
 _last_announce_date = None
-gc = None  # cliente gspread global
 
 
 async def _warmup_and_diagnose():
@@ -230,9 +248,8 @@ async def _warmup_and_diagnose():
         return False
 
     # constrói gspread e testa acesso
-    global gc
     try:
-        gc = build_gspread_client()
+        _ensure_gc()
     except Exception as e:
         print(f"🚨 Falha ao construir cliente Google (JSON/B64 inválido?): {e}")
         return False
@@ -304,140 +321,6 @@ async def anunciar_aniversarios():
     if mentions:
         linhas.append(f"{bolo}{confete} **Hoje tem niver!** Parabéns {', '.join(mentions)}! {confete}{bolo}")
     if nomes_nao:
-        linhas.append(f"{bolo}{confete} **Hoje tem niver!** Parabéns {', '.join(nomes_nao)}! {confete}{bolo}")
+        linhas.append(f"{bolo}{
 
-    try:
-        await channel.send("\n".join(linhas))
-        _last_announce_date = hoje_date_key
-        print(f"Anúncio de aniversários enviado para o canal {DISCORD_CHANNEL_ID}")
-    except Exception as e:
-        print(f"[ERRO] Falha ao enviar mensagem no canal {DISCORD_CHANNEL_ID}: {e}")
-
-
-# ======== Comandos ========
-
-@bot.command(name="testniver")
-async def testniver(ctx):
-    """Mostra o último e o próximo aniversário com base na planilha."""
-    hoje = datetime.now(TZ).date()
-    try:
-        rows = fetch_birthdays_rows()
-    except Exception as e:
-        await ctx.reply(str(e))
-        return
-
-    last_date, last_names, next_date, next_names = _last_and_next_birthdays(rows, hoje)
-
-    if not last_date and not next_date:
-        await ctx.reply("Não encontrei aniversários válidos na planilha.")
-        return
-
-    def fmt(dt: date): return dt.strftime("%d/%m/%Y")
-
-    linhas = ["🎂 **Aniversários (teste)**"]
-    if last_date:
-        dias = (hoje - last_date).days
-        quando = "hoje" if dias == 0 else (f"há {dias} dia" + ("s" if dias != 1 else ""))
-        linhas.append(f"• **Último:** {fmt(last_date)} — {', '.join(last_names)} ({quando})")
-    if next_date:
-        dias = (next_date - hoje).days
-        quando = "hoje" if dias == 0 else (f"em {dias} dia" + ("s" if dias != 1 else ""))
-        linhas.append(f"• **Próximo:** {fmt(next_date)} — {', '.join(next_names)} ({quando})")
-
-    await ctx.reply("\n".join(linhas))
-
-
-@bot.command(name="proximos")
-async def proximos(ctx, dias: int = 30):
-    """Lista próximos aniversários em N dias (padrão 30)."""
-    hoje = datetime.now(TZ).date()
-    try:
-        rows = fetch_birthdays_rows()
-    except Exception as e:
-        await ctx.reply(str(e))
-        return
-
-    futuros = []
-    for r in rows:
-        dm = parse_day_month(r["data"])
-        if not dm:
-            continue
-        d, m = dm
-        ano_ref = hoje.year
-        data_ref = _safe_date(ano_ref, m, d)
-        if data_ref is None or data_ref < hoje:
-            data_ref = _safe_date(ano_ref + 1, m, d)
-        if data_ref is None:
-            continue
-        delta = (data_ref - hoje).days
-        if 0 <= delta <= dias:
-            futuros.append((delta, r["nome"], data_ref.strftime("%d/%m/%Y")))
-    futuros.sort(key=lambda x: x[0])
-
-    if not futuros:
-        await ctx.reply(f"Ninguém faz aniversário nos próximos {dias} dias.")
-        return
-
-    linhas = [f"🎈 **Próximos aniversários (≤ {dias} dias):**"]
-    for delta, nome, data_fmt in futuros:
-        quando = "hoje" if delta == 0 else (f"em {delta} dias")
-        linhas.append(f"• {data_fmt} — {nome} ({quando})")
-    await ctx.reply("\n".join(linhas))
-
-
-@bot.command(name="checknivers")
-async def checknivers(ctx):
-    """Mostra diagnóstico de configuração e acesso ao Sheets."""
-    faltando = _env_ok()
-    status_env = "✅" if not faltando else f"🚨 faltando: {', '.join(faltando)}"
-
-    # linha de credenciais (origem, SA, key_id)
-    try:
-        src, _, sa_email, kid = load_sa_creds()
-        cred_line = f"• Credencial: {src} | SA: `{sa_email}` | key_id: `{kid}`"
-    except Exception as e:
-        cred_line = f"• Credencial: erro ao ler ({e})"
-
-    sheets_ok = "❔"
-    try:
-        rows = fetch_birthdays_rows()
-        sheets_ok = f"✅ acesso OK (linhas: {len(rows)}, aba: {GOOGLE_SHEET_TAB})"
-    except Exception as e:
-        sheets_ok = f"🚨 {e}"
-
-    canal = bot.get_channel(DISCORD_CHANNEL_ID)
-    canal_ok = "✅" if canal else "🚨 canal não encontrado"
-
-    msg = [
-        "🔎 **Diagnóstico botdosnivers**",
-        f"• Env vars: {status_env}",
-        cred_line,
-        f"• Google Sheet ID: `{GOOGLE_SHEET_ID or '(vazio)'}` | Aba: `{GOOGLE_SHEET_TAB}`",
-        f"• Sheets: {sheets_ok}",
-        f"• Canal (ID {DISCORD_CHANNEL_ID}): {canal_ok}",
-        "→ Se for PERMISSION_DENIED, compartilhe a planilha como **Leitor** com o e-mail da Service Account acima."
-    ]
-    await ctx.reply("\n".join(msg))
-
-
-@bot.command(name="credinfo")
-async def credinfo(ctx):
-    """Envia por DM infos da credencial e testa o refresh do token."""
-    try:
-        src, data, email, kid = load_sa_creds()
-        await ctx.author.send(f"🔐 Credencial ativa\n• Origem: {src}\n• SA: {email}\n• key_id: {kid}")
-        creds = Credentials.from_service_account_info(data, scopes=SCOPES)
-        creds.refresh(Request())
-        await ctx.author.send("✅ Token refresh OK — credencial válida.")
-    except Exception as e:
-        await ctx.author.send(f"❌ Token refresh falhou: {e}")
-
-
-# ========= Bootstrap =========
-def main():
-    keep_alive()
-    bot.run(BOT_TOKEN)
-
-if __name__ == "__main__":
-    main()
 
