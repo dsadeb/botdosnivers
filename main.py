@@ -36,11 +36,21 @@ SCOPES = [
 
 def _env_ok():
     faltando = []
-    if not BOT_TOKEN: faltando.append("BOT_TOKEN")
-    if not DISCORD_CHANNEL_ID: faltando.append("DISCORD_CHANNEL_ID")
-    if not GOOGLE_SHEET_ID: faltando.append("GOOGLE_SHEET_ID")
-    if not GOOGLE_SERVICE_ACCOUNT_JSON: faltando.append("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if not BOT_TOKEN:
+        faltando.append("BOT_TOKEN")
+    if not DISCORD_CHANNEL_ID:
+        faltando.append("DISCORD_CHANNEL_ID")
+    if not GOOGLE_SHEET_ID:
+        faltando.append("GOOGLE_SHEET_ID")
+
+    # aceita credencial via B64 OU via JSON em linha única
+    has_b64 = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
+    has_json = bool(GOOGLE_SERVICE_ACCOUNT_JSON)
+    if not (has_b64 or has_json):
+        faltando.append("GOOGLE_SERVICE_ACCOUNT_B64 ou GOOGLE_SERVICE_ACCOUNT_JSON")
+
     return faltando
+
 
 def _sa_email():
     """Retorna o e-mail da Service Account (suporta B64 ou JSON) para mensagens de diagnóstico."""
