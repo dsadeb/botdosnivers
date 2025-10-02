@@ -6,9 +6,11 @@ from discord.ext import tasks, commands
 from datetime import datetime, date
 import pytz
 import json
+import base64
 import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
+from google.auth.transport.requests import Request
 
 # ========= Config e Credenciais =========
 load_dotenv()
@@ -34,70 +36,52 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-def _cred_info():
-    """Retorna (source, client_email, private_key_id)."""
-    try:
+def load_sa_creds():
+    """
+    Carrega a credencial da Service Account a partir de GOOGLE_SERVICE_ACCOUNT_B64 (preferido)
+    ou GOOGLE_SERVICE_ACCOUNT_JSON (fallback). Retorna (src, creds_dict, email, key_id).
+    """
+    b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+    if b64:
+        raw = base64.b64decode(b64)
+        data = json.loads(raw)
+        src = "B64"
+    else:
+        if not GOOGLE_SERVICE_ACCOUNT_JSON:
+            raise RuntimeError("Nenhuma credencial encontrada (B64 ou JSON).")
+        data = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
         src = "JSON"
-        data = None
-        if os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
-            import base64, json as _json
-            raw = base64.b64decode(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
-            data = _json.loads(raw); src = "B64"
-        else:
-            data = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON or "{}")
-        return src, data.get("client_email","?"), data.get("private_key_id","?")
-    except Exception as e:
-        return "erro", f"(falha ao ler credenciais: {e})", "?"
-src, sa_email, kid = _cred_info()
-cred_line = f"• Credencial: {src} | SA: `{sa_email}` | key_id: `{kid}`"
+
+    email = data.get("client_email")
+    key_id = data.get("private_key_id")
+    if not email or not data.get("private_key"):
+        raise RuntimeError("Credencial inválida: falta client_email ou private_key.")
+    return src, data, email, key_id
 
 
 def _env_ok():
     faltando = []
-    if not BOT_TOKEN:
-        faltando.append("BOT_TOKEN")
-    if not DISCORD_CHANNEL_ID:
-        faltando.append("DISCORD_CHANNEL_ID")
-    if not GOOGLE_SHEET_ID:
-        faltando.append("GOOGLE_SHEET_ID")
-
-    # aceita credencial via B64 OU via JSON em linha única
-    has_b64 = bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
-    has_json = bool(GOOGLE_SERVICE_ACCOUNT_JSON)
-    if not (has_b64 or has_json):
+    if not BOT_TOKEN: faltando.append("BOT_TOKEN")
+    if not DISCORD_CHANNEL_ID: faltando.append("DISCORD_CHANNEL_ID")
+    if not GOOGLE_SHEET_ID: faltando.append("GOOGLE_SHEET_ID")
+    if not (os.getenv("GOOGLE_SERVICE_ACCOUNT_B64") or GOOGLE_SERVICE_ACCOUNT_JSON):
         faltando.append("GOOGLE_SERVICE_ACCOUNT_B64 ou GOOGLE_SERVICE_ACCOUNT_JSON")
-
     return faltando
 
 
 def _sa_email():
-    """Retorna o e-mail da Service Account (suporta B64 ou JSON) para mensagens de diagnóstico."""
     try:
-        b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
-        if b64:
-            import base64, json as _json
-            raw = base64.b64decode(b64)
-            d = _json.loads(raw)
-        else:
-            d = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON or "{}")
-        return d.get("client_email") or "(sem client_email no JSON)"
+        _, _, email, _ = load_sa_creds()
+        return email or "(sem client_email)"
     except Exception:
         return "(falha ao ler credenciais)"
 
-gc = None  # inicializado no on_ready
 
 def build_gspread_client():
-    """Monta o cliente do Google Sheets.
-    Dá preferência à credencial em base64 (GOOGLE_SERVICE_ACCOUNT_B64) para evitar problema de \n."""
-    b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
-    if b64:
-        import base64, json as _json
-        raw = base64.b64decode(b64)
-        creds_dict = _json.loads(raw)
-    else:
-        # fallback: JSON em uma linha na env GOOGLE_SERVICE_ACCOUNT_JSON
-        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    src, data, email, kid = load_sa_creds()
+    # Log útil no console na subida:
+    print(f"[Credencial] origem={src} | SA={email} | key_id={kid}")
+    creds = Credentials.from_service_account_info(data, scopes=SCOPES)
     return gspread.authorize(creds)
 
 
@@ -106,6 +90,7 @@ def _safe_date(y: int, m: int, d: int):
         return date(y, m, d)
     except ValueError:
         return None
+
 
 def parse_day_month(date_str: str):
     date_str = str(date_str or "").strip()
@@ -119,6 +104,7 @@ def parse_day_month(date_str: str):
         return (dia, mes)
     except:
         return None
+
 
 def fetch_birthdays_rows():
     """Lê linhas da aba e retorna [{'nome':..., 'data':...}, ...] com tratamento de erros claro."""
@@ -160,6 +146,7 @@ def fetch_birthdays_rows():
             normalized.append({"nome": str(nome).strip(), "data": str(data).strip()})
     return normalized
 
+
 def find_today_birthdays():
     hoje = datetime.now(TZ)
     d, m = hoje.day, hoje.month
@@ -170,6 +157,7 @@ def find_today_birthdays():
             aniversariantes.append(row["nome"])
     return aniversariantes
 
+
 async def match_member_by_name(guild: discord.Guild, alvo_nome: str):
     alvo_norm = alvo_nome.casefold().replace(" ", "")
     for m in guild.members:
@@ -177,6 +165,7 @@ async def match_member_by_name(guild: discord.Guild, alvo_nome: str):
         if alvo_norm in name_norm or name_norm in alvo_norm:
             return m
     return None
+
 
 def _last_and_next_birthdays(rows, today: date):
     past = []
@@ -227,8 +216,11 @@ def _last_and_next_birthdays(rows, today: date):
 
     return last_date, last_names, next_date, next_names
 
+
 # Evita postagens duplicadas se o bot reiniciar no mesmo minuto
 _last_announce_date = None
+gc = None  # cliente gspread global
+
 
 async def _warmup_and_diagnose():
     """Roda checagens e imprime diagnósticos no console."""
@@ -242,7 +234,7 @@ async def _warmup_and_diagnose():
     try:
         gc = build_gspread_client()
     except Exception as e:
-        print(f"🚨 Falha ao construir cliente Google (JSON inválido?): {e}")
+        print(f"🚨 Falha ao construir cliente Google (JSON/B64 inválido?): {e}")
         return False
 
     try:
@@ -253,6 +245,7 @@ async def _warmup_and_diagnose():
         print(str(e))
         return False
 
+
 @bot.event
 async def on_ready():
     print(f"botdosnivers conectado como {bot.user}")
@@ -260,6 +253,7 @@ async def on_ready():
     if not ok:
         print("⚠️ O bot iniciou, mas há problemas de configuração. Use !checknivers para ver detalhes no Discord.")
     anunciar_aniversarios.start()
+
 
 @tasks.loop(minutes=1)
 async def anunciar_aniversarios():
@@ -319,6 +313,7 @@ async def anunciar_aniversarios():
     except Exception as e:
         print(f"[ERRO] Falha ao enviar mensagem no canal {DISCORD_CHANNEL_ID}: {e}")
 
+
 # ======== Comandos ========
 
 @bot.command(name="testniver")
@@ -351,6 +346,7 @@ async def testniver(ctx):
 
     await ctx.reply("\n".join(linhas))
 
+
 @bot.command(name="proximos")
 async def proximos(ctx, dias: int = 30):
     """Lista próximos aniversários em N dias (padrão 30)."""
@@ -364,13 +360,15 @@ async def proximos(ctx, dias: int = 30):
     futuros = []
     for r in rows:
         dm = parse_day_month(r["data"])
-        if not dm: continue
+        if not dm:
+            continue
         d, m = dm
         ano_ref = hoje.year
         data_ref = _safe_date(ano_ref, m, d)
         if data_ref is None or data_ref < hoje:
             data_ref = _safe_date(ano_ref + 1, m, d)
-        if data_ref is None: continue
+        if data_ref is None:
+            continue
         delta = (data_ref - hoje).days
         if 0 <= delta <= dias:
             futuros.append((delta, r["nome"], data_ref.strftime("%d/%m/%Y")))
@@ -386,12 +384,19 @@ async def proximos(ctx, dias: int = 30):
         linhas.append(f"• {data_fmt} — {nome} ({quando})")
     await ctx.reply("\n".join(linhas))
 
+
 @bot.command(name="checknivers")
 async def checknivers(ctx):
     """Mostra diagnóstico de configuração e acesso ao Sheets."""
     faltando = _env_ok()
     status_env = "✅" if not faltando else f"🚨 faltando: {', '.join(faltando)}"
-    sa = _sa_email()
+
+    # linha de credenciais (origem, SA, key_id)
+    try:
+        src, _, sa_email, kid = load_sa_creds()
+        cred_line = f"• Credencial: {src} | SA: `{sa_email}` | key_id: `{kid}`"
+    except Exception as e:
+        cred_line = f"• Credencial: erro ao ler ({e})"
 
     sheets_ok = "❔"
     try:
@@ -406,13 +411,27 @@ async def checknivers(ctx):
     msg = [
         "🔎 **Diagnóstico botdosnivers**",
         f"• Env vars: {status_env}",
-        f"• Service Account: `{sa}`",
+        cred_line,
         f"• Google Sheet ID: `{GOOGLE_SHEET_ID or '(vazio)'}` | Aba: `{GOOGLE_SHEET_TAB}`",
         f"• Sheets: {sheets_ok}",
         f"• Canal (ID {DISCORD_CHANNEL_ID}): {canal_ok}",
         "→ Se for PERMISSION_DENIED, compartilhe a planilha como **Leitor** com o e-mail da Service Account acima."
     ]
     await ctx.reply("\n".join(msg))
+
+
+@bot.command(name="credinfo")
+async def credinfo(ctx):
+    """Envia por DM infos da credencial e testa o refresh do token."""
+    try:
+        src, data, email, kid = load_sa_creds()
+        await ctx.author.send(f"🔐 Credencial ativa\n• Origem: {src}\n• SA: {email}\n• key_id: {kid}")
+        creds = Credentials.from_service_account_info(data, scopes=SCOPES)
+        creds.refresh(Request())
+        await ctx.author.send("✅ Token refresh OK — credencial válida.")
+    except Exception as e:
+        await ctx.author.send(f"❌ Token refresh falhou: {e}")
+
 
 # ========= Bootstrap =========
 def main():
@@ -421,5 +440,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
