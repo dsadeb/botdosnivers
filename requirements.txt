@@ -1,4 +1,6 @@
-discord.py
+discord.py==2.3.2
 python-dotenv
 pytz
-flask
+gspread
+google-auth
+Flask
