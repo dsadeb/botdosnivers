@@ -34,6 +34,29 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
+def _cred_info():
+    """Retorna (source, client_email, private_key_id) ou erro legível."""
+    try:
+        src = "JSON"
+        data = None
+        if os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"):
+            import base64, json as _json
+            raw = base64.b64decode(os.getenv("GOOGLE_SERVICE_ACCOUNT_B64"))
+            data = _json.loads(raw)
+            src = "B64"
+        else:
+            data = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON or "{}")
+
+        return src, data.get("client_email", "?"), data.get("private_key_id", "?")
+    except Exception as e:
+        return "erro", f"(falha ao ler credenciais: {e})", "?"
+
+# dentro do comando !checknivers, antes de montar a mensagem:
+src, sa_email, kid = _cred_info()
+cred_line = f"• Credencial: {src} | SA: `{sa_email}` | key_id: `{kid[-8:] if kid and isinstance(kid, str) else kid}`"
+# e inclua essa linha no array "msg" que o checknivers responde
+
+
 def _env_ok():
     faltando = []
     if not BOT_TOKEN:
