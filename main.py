@@ -43,18 +43,35 @@ def _env_ok():
     return faltando
 
 def _sa_email():
+    """Retorna o e-mail da Service Account (suporta B64 ou JSON) para mensagens de diagnóstico."""
     try:
-        d = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+        if b64:
+            import base64, json as _json
+            raw = base64.b64decode(b64)
+            d = _json.loads(raw)
+        else:
+            d = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON or "{}")
         return d.get("client_email") or "(sem client_email no JSON)"
     except Exception:
-        return "(falha ao ler GOOGLE_SERVICE_ACCOUNT_JSON)"
+        return "(falha ao ler credenciais)"
+
+gc = None  # inicializado no on_ready
 
 def build_gspread_client():
-    creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+    """Monta o cliente do Google Sheets.
+    Dá preferência à credencial em base64 (GOOGLE_SERVICE_ACCOUNT_B64) para evitar problema de \n."""
+    b64 = os.getenv("GOOGLE_SERVICE_ACCOUNT_B64")
+    if b64:
+        import base64, json as _json
+        raw = base64.b64decode(b64)
+        creds_dict = _json.loads(raw)
+    else:
+        # fallback: JSON em uma linha na env GOOGLE_SERVICE_ACCOUNT_JSON
+        creds_dict = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     return gspread.authorize(creds)
 
-gc = None  # inicializado no on_ready
 
 def _safe_date(y: int, m: int, d: int):
     try:
