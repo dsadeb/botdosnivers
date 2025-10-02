@@ -3,4 +3,5 @@ python-dotenv
 pytz
 gspread
 google-auth
+audioop-lts
 Flask
